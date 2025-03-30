@@ -1,0 +1,29 @@
+# router_config.yaml
+resources:
+  # Route file resources to file service
+  "^file://.*": "http://file-service:8080/rpc"
+  # Route database resources to DB service
+  "^db://.*": "http://database-service:8080/rpc"
+  # Route API resources to API gateway
+  "^api://.*": "http://api-gateway:8080/rpc"
+  # Route S3 resources to storage service
+  "^s3://.*": "http://storage-service:8080/rpc"
+
+tools:
+  # Route code generation tools to AI service
+  "^code-.*": "http://ai-service:8080/rpc"
+  # Route data processing tools to data service
+  "^data-.*": "http://data-processing:8080/rpc"
+  # Route search tools to search service
+  "^search.*": "http://search-service:8080/rpc"
+  # Route authentication tools to auth service
+  "^auth.*": "http://auth-service:8080/rpc"
+
+# Default service to route to if no patterns match
+default: "http://localhost.charlesproxy.com:1337/mcp"
+
+# UI authentication settings
+ui:
+  username: "admin"
+  password: "your_secure_password"
+  

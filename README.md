@@ -180,7 +180,8 @@ mcp-router-proxy/
 ## Roadmap
 
 The following features are planned for upcoming releases:
-
+- **ADD SSE SUPPORT**: Add support for SSE (Server-Sent Events) to the proxy
+- **Complete Message Forwarding**: Ensure all MCP message types (including roots and sampling) are properly forwarded without interference
 - **Intelligent Caching**: Response caching with configurable TTL, cache invalidation, and support for memory and Redis backends
 - **Rate Limiting**: Configurable rate limiting with multiple strategies, response headers, and distributed rate limiting support
 - **Circuit Breaking**: Automatic detection of backend failures with fallback responses

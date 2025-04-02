@@ -65,10 +65,12 @@ func (r *Router) HandleMCPRequest(w http.ResponseWriter, req *http.Request) {
 	startTime := time.Now()
 	var isError bool
 
+	r.Logger.Info("Received request: Method=%s, Path=%s, ContentType=%s",
+		req.Method, req.URL.Path, req.Header.Get("Content-Type"))
+
 	// Handle OPTIONS requests (CORS preflight)
 	if req.Method == http.MethodOptions {
-		r.Logger.Debug("Received OPTIONS request (CORS preflight)")
-
+		r.Logger.Debug("Handling OPTIONS request")
 		// Set CORS headers
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -83,8 +85,7 @@ func (r *Router) HandleMCPRequest(w http.ResponseWriter, req *http.Request) {
 
 	// Check if this is a GET request (for SSE streaming)
 	if req.Method == http.MethodGet {
-		r.Logger.Debug("Received GET request (SSE streaming)")
-
+		r.Logger.Debug("Handling GET request for SSE")
 		// Extract session ID if present
 		sessionID := req.Header.Get("Mcp-Session-Id")
 		r.Logger.Debug("Session ID: %s", sessionID)
@@ -97,6 +98,7 @@ func (r *Router) HandleMCPRequest(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
 
 		// Create a new GET request to the target server
 		proxyReq, err := http.NewRequest(http.MethodGet, targetURL, nil)
@@ -121,11 +123,9 @@ func (r *Router) HandleMCPRequest(w http.ResponseWriter, req *http.Request) {
 
 		// Make the request to the target server
 		client := &http.Client{
-			Timeout: DefaultTimeout,
+			// No timeout for SSE connections
 		}
-		ctx, cancel := context.WithTimeout(req.Context(), DefaultTimeout)
-		defer cancel()
-		proxyReq = proxyReq.WithContext(ctx)
+
 		resp, err := client.Do(proxyReq)
 		if err != nil {
 			r.Logger.Error("Error connecting to target server: %v", err)
@@ -149,20 +149,21 @@ func (r *Router) HandleMCPRequest(w http.ResponseWriter, req *http.Request) {
 
 		r.Logger.Debug("Successfully connected to SSE stream from target")
 
+		// Create a context that's canceled when the client connection closes
+		ctx, cancel := context.WithCancel(req.Context())
+		defer cancel()
+
 		// Create a done channel to signal when to close the connection
 		done := make(chan bool)
-		closeOnce := sync.Once{} // Add this to ensure the channel is closed only once
+		var once sync.Once // Add this to ensure the channel is only closed once
 
-		// Handle client disconnection
-		clientGone := w.(http.CloseNotifier).CloseNotify()
+		// Handle client disconnection using context
 		go func() {
-			<-clientGone
-			// Signal that we're done - use closeOnce to prevent double close
-			closeOnce.Do(func() {
-				close(done)
-			})
+			<-ctx.Done()
+			once.Do(func() { close(done) }) // Use sync.Once to safely close the channel
 			// Also close the response body to terminate the connection to the target
 			resp.Body.Close()
+			r.Logger.Debug("Client disconnected, closing SSE stream")
 		}()
 
 		// Stream SSE events from target to client
@@ -175,15 +176,22 @@ func (r *Router) HandleMCPRequest(w http.ResponseWriter, req *http.Request) {
 
 			eventCount := 0
 			for scanner.Scan() {
-				line := scanner.Text()
-				fmt.Fprintf(w, "%s\n", line)
-				// If this is the end of an event, flush the buffer
-				if line == "" {
-					eventCount++
-					if eventCount%100 == 0 {
-						r.Logger.Debug("Streamed %d SSE events so far", eventCount)
+				select {
+				case <-done:
+					return
+				default:
+					line := scanner.Text()
+					fmt.Fprintf(w, "%s\n", line)
+					// If this is the end of an event, flush the buffer
+					if line == "" {
+						eventCount++
+						if eventCount%100 == 0 {
+							r.Logger.Debug("Streamed %d SSE events so far", eventCount)
+						}
+						if flusher, ok := w.(http.Flusher); ok {
+							flusher.Flush()
+						}
 					}
-					w.(http.Flusher).Flush()
 				}
 			}
 
@@ -192,16 +200,262 @@ func (r *Router) HandleMCPRequest(w http.ResponseWriter, req *http.Request) {
 			}
 
 			r.Logger.Info("SSE stream closed after sending %d events", eventCount)
-			// If we reach here, the target server closed the connection
-			// Use closeOnce to prevent double close
-			closeOnce.Do(func() {
-				close(done)
-			})
+			once.Do(func() { close(done) }) // Safely close the channel if not already closed
+		}()
+
+		// Set up heartbeat ticker
+		heartbeatTicker := time.NewTicker(30 * time.Second)
+		defer heartbeatTicker.Stop()
+
+		// Send heartbeat events to keep the connection alive
+		go func() {
+			for {
+				select {
+				case <-heartbeatTicker.C:
+					// Send a heartbeat event
+					fmt.Fprintf(w, "event: heartbeat\ndata: %d\n\n", time.Now().Unix())
+					if flusher, ok := w.(http.Flusher); ok {
+						flusher.Flush()
+					}
+					r.Logger.Debug("Sent heartbeat event")
+				case <-done:
+					return
+				}
+			}
 		}()
 
 		// Wait until done
 		<-done
 		r.UI.Stats.RecordRequest("GET", targetURL, time.Since(startTime), isError)
+		return
+	}
+
+	// Handle POST requests (client sending messages to server)
+	if req.Method == http.MethodPost {
+		r.Logger.Debug("Handling POST request")
+
+		// Read the request body
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			r.Logger.Error("Error reading request body: %v", err)
+			http.Error(w, "error reading request body: "+err.Error(), http.StatusBadRequest)
+			isError = true
+			r.UI.Stats.RecordRequest("POST", "unknown", time.Since(startTime), isError)
+			return
+		}
+
+		// Parse the JSON-RPC request to determine routing
+		var jsonRPCRequest JSONRPCRequest
+		if err := json.Unmarshal(body, &jsonRPCRequest); err != nil {
+			// Try to parse as a batch request
+			var batchRequest []JSONRPCRequest
+			if batchErr := json.Unmarshal(body, &batchRequest); batchErr != nil {
+				r.Logger.Error("Error parsing JSON-RPC request: %v", err)
+				http.Error(w, "error parsing JSON-RPC request: "+err.Error(), http.StatusBadRequest)
+				isError = true
+				r.UI.Stats.RecordRequest("POST", "invalid_json", time.Since(startTime), isError)
+				return
+			}
+			// Use the first request in the batch for routing
+			if len(batchRequest) > 0 {
+				jsonRPCRequest = batchRequest[0]
+			}
+		}
+
+		// Extract session ID if present
+		sessionID := req.Header.Get("Mcp-Session-Id")
+		r.Logger.Debug("Session ID: %s", sessionID)
+
+		// Check if this is an initialization request
+		isInitialize := jsonRPCRequest.Method == "initialize"
+
+		// Determine target URL based on the request content
+		targetURL := r.determineTargetForSession(sessionID)
+		r.Logger.Info("Routing request to target: %s", targetURL)
+
+		// Create a new POST request to the target server
+		proxyReq, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(body))
+		if err != nil {
+			r.Logger.Error("Error creating proxy request: %v", err)
+			http.Error(w, "error creating proxy request: "+err.Error(), http.StatusInternalServerError)
+			isError = true
+			r.UI.Stats.RecordRequest("POST", targetURL, time.Since(startTime), isError)
+			return
+		}
+
+		// Copy headers from the original request
+		proxyReq.Header.Set("Content-Type", "application/json")
+
+		// Set Accept header to support both JSON and SSE responses
+		proxyReq.Header.Set("Accept", req.Header.Get("Accept"))
+		if proxyReq.Header.Get("Accept") == "" {
+			proxyReq.Header.Set("Accept", "application/json, text/event-stream")
+		}
+
+		// Forward session ID if present
+		if sessionID != "" {
+			proxyReq.Header.Set("Mcp-Session-Id", sessionID)
+		}
+
+		// Make the request to the target server with a reasonable timeout
+		client := &http.Client{
+			Timeout: 30 * time.Second, // Use a longer timeout for initialization
+		}
+
+		resp, err := client.Do(proxyReq)
+		if err != nil {
+			r.Logger.Error("Error connecting to target server: %v", err)
+			http.Error(w, "error connecting to target server: "+err.Error(), http.StatusBadGateway)
+			isError = true
+			r.UI.Stats.RecordRequest("POST", targetURL, time.Since(startTime), isError)
+			return
+		}
+		defer resp.Body.Close()
+
+		// Check if the target server returned an error
+		if resp.StatusCode >= 400 {
+			// Read error body and forward it to the client
+			errorBody, _ := io.ReadAll(resp.Body)
+			r.Logger.Error("Target server returned error status %d: %s", resp.StatusCode, string(errorBody))
+			for name, values := range resp.Header {
+				for _, value := range values {
+					w.Header().Add(name, value)
+				}
+			}
+			w.WriteHeader(resp.StatusCode)
+			w.Write(errorBody)
+			isError = true
+			r.UI.Stats.RecordRequest("POST", targetURL, time.Since(startTime), isError)
+			return
+		}
+
+		// Check if this is an initialization response with a session ID
+		if isInitialize && resp.Header.Get("Mcp-Session-Id") != "" {
+			newSessionID := resp.Header.Get("Mcp-Session-Id")
+			r.Logger.Info("Received new session ID: %s", newSessionID)
+
+			// Store the session ID and target URL mapping
+			r.SessionStore.Set(newSessionID, targetURL)
+		}
+
+		// Check content type to determine how to handle the response
+		contentType := resp.Header.Get("Content-Type")
+
+		// Copy all response headers to the client
+		for name, values := range resp.Header {
+			for _, value := range values {
+				w.Header().Add(name, value)
+			}
+		}
+
+		// If the response is an SSE stream, handle it accordingly
+		if strings.Contains(contentType, "text/event-stream") {
+			r.Logger.Debug("Target server returned SSE stream")
+
+			// Set SSE headers
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+
+			// Create a context that's canceled when the client connection closes
+			ctx, cancel := context.WithCancel(req.Context())
+			defer cancel()
+
+			// Create a done channel to signal when to close the connection
+			done := make(chan bool)
+			var once sync.Once // Add this to ensure the channel is only closed once
+
+			// Handle client disconnection
+			go func() {
+				<-ctx.Done()
+				once.Do(func() { close(done) }) // Use sync.Once to safely close the channel
+				r.Logger.Debug("Client disconnected, closing SSE stream")
+			}()
+
+			// Stream SSE events from target to client
+			scanner := bufio.NewScanner(resp.Body)
+			// Set a larger buffer for the scanner to handle large SSE events
+			const maxScanTokenSize = 1024 * 1024 // 1MB
+			buf := make([]byte, maxScanTokenSize)
+			scanner.Buffer(buf, maxScanTokenSize)
+
+			go func() {
+				for scanner.Scan() {
+					select {
+					case <-done:
+						return
+					default:
+						line := scanner.Text()
+						fmt.Fprintf(w, "%s\n", line)
+						// If this is the end of an event, flush the buffer
+						if line == "" {
+							if flusher, ok := w.(http.Flusher); ok {
+								flusher.Flush()
+							}
+						}
+					}
+				}
+
+				if err := scanner.Err(); err != nil {
+					r.Logger.Error("Error scanning SSE stream: %v", err)
+				}
+
+				once.Do(func() { close(done) }) // Safely close the channel if not already closed
+			}()
+
+			// Set up heartbeat ticker
+			heartbeatTicker := time.NewTicker(30 * time.Second)
+			defer heartbeatTicker.Stop()
+
+			// Send heartbeat events to keep the connection alive
+			go func() {
+				for {
+					select {
+					case <-heartbeatTicker.C:
+						// Send a heartbeat event
+						fmt.Fprintf(w, "event: heartbeat\ndata: %d\n\n", time.Now().Unix())
+						if flusher, ok := w.(http.Flusher); ok {
+							flusher.Flush()
+						}
+						r.Logger.Debug("Sent heartbeat event")
+					case <-done:
+						return
+					}
+				}
+			}()
+
+			// Wait until done
+			<-done
+			r.UI.Stats.RecordRequest("POST", targetURL, time.Since(startTime), isError)
+			return
+		}
+
+		// For regular JSON responses, just copy the response body
+		responseBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			r.Logger.Error("Error reading response body: %v", err)
+			http.Error(w, "error reading response body: "+err.Error(), http.StatusInternalServerError)
+			isError = true
+			r.UI.Stats.RecordRequest("POST", targetURL, time.Since(startTime), isError)
+			return
+		}
+
+		// Write the response status code and body
+		w.WriteHeader(resp.StatusCode)
+		w.Write(responseBody)
+
+		// If this was an initialization request, log the response
+		if isInitialize {
+			r.Logger.Info("Successfully processed initialization request")
+
+			// Parse the response to extract any relevant information
+			var initResponse map[string]interface{}
+			if err := json.Unmarshal(responseBody, &initResponse); err == nil {
+				r.Logger.Debug("Initialization response: %v", initResponse)
+			}
+		}
+
+		r.UI.Stats.RecordRequest("POST", targetURL, time.Since(startTime), isError)
 		return
 	}
 

@@ -28,11 +28,19 @@ type RouteRule struct {
 	Target  string
 }
 
+// ToolMapping structure for tool mapping
+type ToolMapping struct {
+	OriginalName string `yaml:"originalName"`
+	TargetName   string `yaml:"targetName"`
+	Target       string `yaml:"target"`
+}
+
 // Config holds the application configuration and related data
 type Config struct {
 	RouteConfig     RouteConfig
 	ResourceRegexes []RouteRule
 	ToolRegexes     []RouteRule
+	ToolMappings    []ToolMapping
 	ConfigMutex     sync.RWMutex
 }
 
@@ -154,4 +162,11 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+// GetToolMappings returns a copy of the tool mappings with read lock
+func (c *Config) GetToolMappings() []ToolMapping {
+	c.ConfigMutex.RLock()
+	defer c.ConfigMutex.RUnlock()
+	return c.ToolMappings
 }

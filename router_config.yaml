@@ -8,6 +8,8 @@ resources:
   "^api://.*": "http://api-gateway:8080/rpc"
   # Route S3 resources to storage service
   "^s3://.*": "http://storage-service:8080/rpc"
+  "^weather/.*": "http://weather-service:8080/mcp"
+  "^database/.*": "http://database-service:8080/mcp"
 
 tools:
   # Route code generation tools to AI service
@@ -18,12 +20,22 @@ tools:
   "^search.*": "http://search-service:8080/rpc"
   # Route authentication tools to auth service
   "^auth.*": "http://auth-service:8080/rpc"
+  "^calculator$": "http://calculator-service:8080/mcp"
+  "^translator$": "http://translator-service:8080/mcp"
 
 # Default service to route to if no patterns match
-default: "http://localhost.charlesproxy.com:1337/mcp"
+default: "http://default-service:8080/mcp"
 
 # UI authentication settings
 ui:
   username: "admin"
   password: "your_secure_password"
+
+toolMappings:
+  - originalName: "weather"
+    targetName: "getWeather"
+    target: "http://weather-service:8080/mcp"
+  - originalName: "search"
+    targetName: "googleSearch"
+    target: "http://search-service:8080/mcp"
   

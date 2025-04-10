@@ -1,8 +1,6 @@
-# MCP Catie - Context Aware Traffic Ingress Engine
+# MCP Router Proxy
 
 A lightweight, configurable proxy service for routing MCP (Model Context Protocol) JSON-RPC requests to appropriate backend services based on request content.
-
-> **Note:** This project is currently in alpha status.
 
 ## Features
 
@@ -10,13 +8,12 @@ A lightweight, configurable proxy service for routing MCP (Model Context Protoco
 - Pattern-based routing using regular expressions
 - Session-aware routing to maintain client connections to the same backend
 - Support for Streamable HTTP transport with SSE (Server-Sent Events)
+- Tool name mapping to resolve naming conflicts between different backends
 - Hot-reloading of configuration without service restart
 - Graceful shutdown handling
 - Health check endpoint for monitoring
-- Prometheus metrics integration for observability
 - Structured logging
 - Containerized deployment with Docker
-- Basic authentication for monitoring UI
 
 ## Architecture
 
@@ -40,20 +37,39 @@ resources:
 tools:
   "^calculator$": "http://calculator-service:8080/mcp"
   "^translator$": "http://translator-service:8080/mcp"
+toolMappings:
+  - originalName: "weather"
+    targetName: "getWeather"
+    target: "http://weather-service:8080/mcp"
+  - originalName: "search"
+    targetName: "googleSearch"
+    target: "http://search-service:8080/mcp"
 default: "http://default-service:8080/mcp"
-ui:
-  username: "admin"
-  password: "your_secure_password"
 ```
 
 The configuration consists of:
 
 - `resources`: Regex patterns for resource URIs and their target endpoints
 - `tools`: Regex patterns for tool names and their target endpoints
+- `toolMappings`: Mappings for tool name transformations to resolve naming conflicts
 - `default`: Fallback endpoint for requests that don't match any pattern
-- `ui`: Authentication credentials for the monitoring UI
 
 The configuration file is automatically reloaded when changes are detected.
+
+## Tool Name Mapping
+
+The tool name mapping feature allows you to present a unified tool interface to clients while handling naming differences across backend MCP servers. This is useful when:
+
+- Different backends use different names for similar functionality
+- You want to present a simplified or standardized naming scheme to clients
+- You need to avoid naming conflicts between tools from different backends
+
+For each tool mapping, specify:
+- `originalName`: The name presented to clients
+- `targetName`: The actual name expected by the backend server
+- `target`: The URL of the target backend server
+
+When a client makes a tool call with the original name, MCProute automatically transforms it to the target name before forwarding the request to the appropriate backend.
 
 ## Installation
 

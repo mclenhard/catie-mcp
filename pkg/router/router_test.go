@@ -38,6 +38,11 @@ func (m *MockConfig) GetAllTargets() []string {
 	return m.AllTargets
 }
 
+func (m *MockConfig) GetToolMappings() []config.ToolMapping {
+	// Return an empty map for testing purposes
+	return []config.ToolMapping{}
+}
+
 func TestRouteByContext(t *testing.T) {
 	// Create a mock config
 	mockConfig := &MockConfig{

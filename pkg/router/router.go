@@ -1,4 +1,3 @@
-// Package router provides routing functionality for the MCP router proxy
 package router
 
 import (
@@ -34,6 +33,7 @@ type ConfigInterface interface {
 	GetResourceRegexes() []config.RouteRule
 	GetToolRegexes() []config.RouteRule
 	GetAllTargets() []string
+	GetToolMappings() []config.ToolMapping
 }
 
 // Router handles the routing of MCP requests
@@ -273,8 +273,18 @@ func (r *Router) HandleMCPRequest(w http.ResponseWriter, req *http.Request) {
 		targetURL := r.determineTargetForSession(sessionID)
 		r.Logger.Info("Routing request to target: %s", targetURL)
 
+		// Apply tool name transformation if needed
+		r.transformToolCall(jsonRPCRequest, targetURL)
+
+		// Re-encode the possibly modified request
+		modifiedBody, err := json.Marshal(jsonRPCRequest)
+		if err != nil {
+			http.Error(w, "error encoding request: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
 		// Create a new POST request to the target server
-		proxyReq, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(body))
+		proxyReq, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(modifiedBody))
 		if err != nil {
 			r.Logger.Error("Error creating proxy request: %v", err)
 			http.Error(w, "error creating proxy request: "+err.Error(), http.StatusInternalServerError)
@@ -687,4 +697,27 @@ func (r *Router) RouteByContext(req JSONRPCRequest) string {
 	}
 	r.Logger.Debug("No specific routing rule matched, using default target")
 	return r.Config.GetDefault()
+}
+
+// transformToolCall applies tool name transformation if needed
+func (r *Router) transformToolCall(req JSONRPCRequest, targetURL string) {
+	// Access fields directly
+	if req.Method != "tools/call" {
+		return
+	}
+
+	// Check if name exists in params
+	name, ok := req.Params["name"].(string)
+	if !ok {
+		return
+	}
+
+	// Rest of function remains the same
+	for _, mapping := range r.Config.GetToolMappings() {
+		if mapping.OriginalName == name && mapping.Target == targetURL {
+			// Transform the tool name
+			req.Params["name"] = mapping.TargetName
+			return
+		}
+	}
 }

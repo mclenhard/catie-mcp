@@ -1,19 +1,19 @@
-# MCP Router Proxy
+# MCP Catie - Context Aware Traffic Ingress Engine
 
-A lightweight, configurable proxy service for routing MCP (Model Context Protocol) JSON-RPC requests to appropriate backend services based on request content.
+A lightweight, configurable reverse proxy for routing and load balancing MCP (Model Context Protocol) requests to appropriate backend services based on request content.
+
+For detailed documentation, visit [Catie MCP Documentation](https://www.catiemcp.com/docs/).
 
 ## Features
 
-- Dynamic routing of MCP JSON-RPC requests based on method and parameters
-- Pattern-based routing using regular expressions
+- Dynamic routing of MCP JSON-RPC requests based on tool call 
+- Concatenate tools from multiple different MCP Servers so the client gets a unified view of all tools without the user installing multiple servers. 
 - Session-aware routing to maintain client connections to the same backend
 - Support for Streamable HTTP transport with SSE (Server-Sent Events)
-- Tool name mapping to resolve naming conflicts between different backends
-- Hot-reloading of configuration without service restart
-- Graceful shutdown handling
-- Health check endpoint for monitoring
-- Structured logging
+- Tool name mapping and namespacing to resolve naming conflicts between different backends
+- Prometheus metrics integration for observability
 - Containerized deployment with Docker
+- Basic authentication for monitoring UI
 
 ## Architecture
 
@@ -45,6 +45,9 @@ toolMappings:
     targetName: "googleSearch"
     target: "http://search-service:8080/mcp"
 default: "http://default-service:8080/mcp"
+ui:
+  username: "admin"
+  password: "your_secure_password"
 ```
 
 The configuration consists of:
@@ -53,6 +56,7 @@ The configuration consists of:
 - `tools`: Regex patterns for tool names and their target endpoints
 - `toolMappings`: Mappings for tool name transformations to resolve naming conflicts
 - `default`: Fallback endpoint for requests that don't match any pattern
+- `ui`: Authentication credentials for the monitoring UI
 
 The configuration file is automatically reloaded when changes are detected.
 
